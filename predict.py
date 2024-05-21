@@ -18,6 +18,9 @@ from cog import BasePredictor, Input, Path
 
 from PIL import Image, ImageFilter
 
+from image_segmenter import ImageSegmenter
+from ultralytics import YOLO
+
 import mimetypes
 mimetypes.add_type("image/webp", ".webp")
 
@@ -56,6 +59,8 @@ class Predictor(BasePredictor):
         base64_encoded_data = base64.b64encode(file_path.read_bytes())
         base64_image = base64_encoded_data.decode('utf-8')
 
+        self.seg_model = ImageSegmenter(model_type="yolov8m-seg-custom")
+        self.seg_model.is_show_segmentation = False
         
         
         payload = {
@@ -250,6 +255,8 @@ class Predictor(BasePredictor):
         print("Running prediction")
         start_time = time.time()
         
+
+
         # checkpoint name changed bc hashing is deactivated so name is corrected here to old name to avoid breaking api calls
         if sd_model == "epicrealism_naturalSinRC1VAE.safetensors [84d76a0328]":
             sd_model = "epicrealism_naturalSinRC1VAE.safetensors"
@@ -266,136 +273,147 @@ class Predictor(BasePredictor):
             sd_model = os.path.basename(path_to_custom_checkpoint)
             self.api.refresh_checkpoints()
         
-        image_file_path = image
+        # Before processing, extract all hands. Mantain the rest of the pipeline.
+        image_np_array = np.frombuffer(binary_image_data, dtype=np.uint8)
+        original_image = cv2.imdecode(image_np_array, cv2.IMREAD_UNCHANGED)
+        hands_bboxes = self.seg_model.predict(original_image)
 
-        with open(image_file_path, "rb") as image_file:
-            binary_image_data = image_file.read()
+        for i, hand_bb in enumerate(hands_bboxes):
+            x1, y1, x2, y2 = hand_bb
+            section = image[y1:y2, x1:x2]
+            hand_fp = f"hand_{i}.png"
+            cv2.imwrite(hand_fp, section)
 
-        if mask:
-            with Image.open(image_file_path) as img:
-                original_resolution = img.size
-
-        if downscaling:
-            image_np_array = np.frombuffer(binary_image_data, dtype=np.uint8)
-
-            image = cv2.imdecode(image_np_array, cv2.IMREAD_UNCHANGED)
-
-            height, width = image.shape[:2]
+            image_file_path = hand_fp #image
             
-            if height > width:
-                scaling_factor = downscaling_resolution / float(height)
-            else:
-                scaling_factor = downscaling_resolution / float(width)
-            
-            new_width = int(width * scaling_factor)
-            new_height = int(height * scaling_factor)
+            with open(image_file_path, "rb") as image_file:
+                binary_image_data = image_file.read()
 
-            resized_image = cv2.resize(image, (new_width, new_height))
+            if mask:
+                with Image.open(image_file_path) as img:
+                    original_resolution = img.size
 
-            _, binary_resized_image = cv2.imencode('.jpg', resized_image)
-            binary_image_data = binary_resized_image.tobytes()
+            if downscaling:
+                image_np_array = np.frombuffer(binary_image_data, dtype=np.uint8)
 
-        base64_encoded_data = base64.b64encode(binary_image_data)
-        base64_image = base64_encoded_data.decode('utf-8')
+                image = cv2.imdecode(image_np_array, cv2.IMREAD_UNCHANGED)
 
-        multipliers = [scale_factor]
-        if scale_factor > 2:
-            multipliers = self.calc_scale_factors(scale_factor)
-            print("Upscale your image " + str(len(multipliers)) + " times")
-        
-        first_iteration = True
-
-        for multiplier in multipliers:
-            print("Upscaling with scale_factor: ", multiplier)
-            
-            if not first_iteration:
-                creativity = creativity * 0.8
-                seed = seed +1
+                height, width = image.shape[:2]
                 
-            first_iteration = False
+                if height > width:
+                    scaling_factor = downscaling_resolution / float(height)
+                else:
+                    scaling_factor = downscaling_resolution / float(width)
+                
+                new_width = int(width * scaling_factor)
+                new_height = int(height * scaling_factor)
 
-            payload = {
-                "override_settings": {
-                    "sd_model_checkpoint": sd_model,
-                    "sd_vae": "vae-ft-mse-840000-ema-pruned.safetensors",
-                    "CLIP_stop_at_last_layers": 1,
-                },
-                "override_settings_restore_afterwards": False,
-                "init_images": [base64_image],
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "steps": num_inference_steps,
-                "cfg_scale": dynamic,
-                "seed": seed,
-                "do_not_save_samples": True,
-                "sampler_name": scheduler,
-                "denoising_strength": creativity,
-                "alwayson_scripts": {
-                    "Tiled Diffusion": {
-                        "args": [
-                            True,
-                            "MultiDiffusion",
-                            True,
-                            True,
-                            1,
-                            1,
-                            tiling_width,
-                            tiling_height,
-                            4,
-                            8,
-                            "4x-UltraSharp",
-                            multiplier, 
-                            False, 
-                            0,
-                            0.0, 
-                            3,
-                        ]
+                resized_image = cv2.resize(image, (new_width, new_height))
+
+                _, binary_resized_image = cv2.imencode('.jpg', resized_image)
+                binary_image_data = binary_resized_image.tobytes()
+
+            base64_encoded_data = base64.b64encode(binary_image_data)
+            base64_image = base64_encoded_data.decode('utf-8')
+
+            multipliers = [scale_factor]
+            if scale_factor > 2:
+                multipliers = self.calc_scale_factors(scale_factor)
+                print("Upscale your image " + str(len(multipliers)) + " times")
+            
+            first_iteration = True
+
+            for multiplier in multipliers:
+                print("Upscaling with scale_factor: ", multiplier)
+                
+                if not first_iteration:
+                    creativity = creativity * 0.8
+                    seed = seed +1
+                    
+                first_iteration = False
+
+                payload = {
+                    "override_settings": {
+                        "sd_model_checkpoint": sd_model,
+                        "sd_vae": "vae-ft-mse-840000-ema-pruned.safetensors",
+                        "CLIP_stop_at_last_layers": 1,
                     },
-                    "Tiled VAE": {
-                        "args": [
-                            True,
-                            2048,
-                            128,
-                            True,
-                            True,
-                            True,
-                            True,
-                        ]
-                    },
-                    "controlnet": {
-                        "args": [
-                            {
-                                "enabled": True,
-                                "module": "tile_resample",
-                                "model": "control_v11f1e_sd15_tile",
-                                "weight": resemblance,
-                                "image": base64_image,
-                                "resize_mode": 1,
-                                "lowvram": False,
-                                "downsample": 1.0,
-                                "guidance_start": 0.0,
-                                "guidance_end": 1.0,
-                                "control_mode": 1,
-                                "pixel_perfect": True,
-                                "threshold_a": 1,
-                                "threshold_b": 1,
-                                "save_detected_map": False,
-                                "processor_res": 512,
-                            }
-                        ]
+                    "override_settings_restore_afterwards": False,
+                    "init_images": [base64_image],
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "steps": num_inference_steps,
+                    "cfg_scale": dynamic,
+                    "seed": seed,
+                    "do_not_save_samples": True,
+                    "sampler_name": scheduler,
+                    "denoising_strength": creativity,
+                    "alwayson_scripts": {
+                        "Tiled Diffusion": {
+                            "args": [
+                                True,
+                                "MultiDiffusion",
+                                True,
+                                True,
+                                1,
+                                1,
+                                tiling_width,
+                                tiling_height,
+                                4,
+                                8,
+                                "4x-UltraSharp",
+                                multiplier, 
+                                False, 
+                                0,
+                                0.0, 
+                                3,
+                            ]
+                        },
+                        "Tiled VAE": {
+                            "args": [
+                                True,
+                                2048,
+                                128,
+                                True,
+                                True,
+                                True,
+                                True,
+                            ]
+                        },
+                        "controlnet": {
+                            "args": [
+                                {
+                                    "enabled": True,
+                                    "module": "tile_resample",
+                                    "model": "control_v11f1e_sd15_tile",
+                                    "weight": resemblance,
+                                    "image": base64_image,
+                                    "resize_mode": 1,
+                                    "lowvram": False,
+                                    "downsample": 1.0,
+                                    "guidance_start": 0.0,
+                                    "guidance_end": 1.0,
+                                    "control_mode": 1,
+                                    "pixel_perfect": True,
+                                    "threshold_a": 1,
+                                    "threshold_b": 1,
+                                    "save_detected_map": False,
+                                    "processor_res": 512,
+                                }
+                            ]
+                        }
                     }
                 }
-            }
 
-            req = self.StableDiffusionImg2ImgProcessingAPI(**payload)
-            resp = self.api.img2imgapi(req)
-            info = json.loads(resp.info)
+                req = self.StableDiffusionImg2ImgProcessingAPI(**payload)
+                resp = self.api.img2imgapi(req)
+                info = json.loads(resp.info)
 
-            base64_image = resp.images[0]
+                base64_image = resp.images[0]
 
-            outputs = []
-
-            for i, image in enumerate(resp.images):
+                
+                #for i, image in enumerate(resp.images):
+                image = resp.images[0]
                 seed = info.get("all_seeds", [])[i] or "unknown_seed"
 
                 gen_bytes = BytesIO(base64.b64decode(image))
@@ -422,21 +440,40 @@ class Predictor(BasePredictor):
                 
                 optimised_file_path = Path(f"{seed}-{uuid.uuid1()}.{output_format}")
 
+                # Composite to the original image
+                
+                hand_mask = np.zeros((original_image.size[1], original_image.size[0]), dtype=np.uint8)
+
+                padding = 10
+                hand_mask[y1-padding:y2+padding, x1-padding:x2+padding] = 255
+
+                hand_mask = Image.fromarray(hand_mask)
+                hand_mask = hand_mask.resize(original_resolution, Image.LANCZOS)
+                hand_mask = hand_mask.convert("L")
+                hand_mask = hand_mask.filter(ImageFilter.GaussianBlur(blur_radius))
+
+                output_image = Image.composite(original_image, imageObject, hand_mask)
+                original_image = output_image
+
                 if output_format in ["webp", "jpg"]:
-                    imageObject.save(
+                    output_image.save(
                         optimised_file_path,
                         quality=95,
                         optimize=True,
                     )
                 else:
-                    imageObject.save(optimised_file_path)
+                    output_image.save(optimised_file_path)
 
-                outputs.append(optimised_file_path)
+                #outputs.append(optimised_file_path)
 
-        if custom_sd_model:
-            os.remove(path_to_custom_checkpoint)
-            print(f"Custom checkpoint {path_to_custom_checkpoint} has been removed.")
+            outputs = [optimised_file_path]
+            
+            if custom_sd_model:
+                os.remove(path_to_custom_checkpoint)
+                print(f"Custom checkpoint {path_to_custom_checkpoint} has been removed.")
 
-        print(f"Prediction took {round(time.time() - start_time,2)} seconds")
-        return outputs
-    
+            print(f"Prediction took {round(time.time() - start_time,2)} seconds")
+
+            return outputs
+            #return outputs
+        
