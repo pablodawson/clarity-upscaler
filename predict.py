@@ -280,7 +280,8 @@ class Predictor(BasePredictor):
 
         for i, hand_bb in enumerate(hands_bboxes):
             x1, y1, x2, y2 = hand_bb
-            section = image[y1:y2, x1:x2]
+            padding = 10
+            section = original_image[y1-padding:y2+padding, x1-padding:x2+padding]
             hand_fp = f"hand_{i}.png"
             cv2.imwrite(hand_fp, section)
 
@@ -467,7 +468,7 @@ class Predictor(BasePredictor):
                 #outputs.append(optimised_file_path)
 
             outputs = [optimised_file_path]
-            
+
             if custom_sd_model:
                 os.remove(path_to_custom_checkpoint)
                 print(f"Custom checkpoint {path_to_custom_checkpoint} has been removed.")
